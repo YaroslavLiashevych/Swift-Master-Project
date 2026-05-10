@@ -42,11 +42,12 @@ jobs:
           
           for file in $FILES; do
             echo "🔍 Файл: $file"
+            # Перетворюємо шлях TestCases/File.swift -> report_TestCases_File.swift.json
             report_name="report_$(echo "$file" | sed 's/\//_/g').json"
             
             swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
             
-            echo "⏳ Пауза 45с (Rate Limit)..."
+            echo "⏳ Пауза 45с (Rate Limit Groq)..."
             sleep 45
           done
 
@@ -63,7 +64,7 @@ jobs:
             });
             const commit_id = pullRequest.head.sha;
 
-            // Отримуємо реальні шляхи файлів у проекті
+            // Отримуємо список змінених файлів
             const { data: prFiles } = await github.rest.pulls.listFiles({
               owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
             });
@@ -73,7 +74,8 @@ jobs:
             const { data: comments_list } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
-            for (const c of comments_list.filter(c => c.user.login === 'github-actions[bot]' && c.body.includes('## 🤖 Swift Hybrid AI Review'))) {
+            const oldBotComments = comments_list.filter(c => c.user.login === 'github-actions[bot]' && c.body.includes('## 🤖 Swift Hybrid AI Review'));
+            for (const c of oldBotComments) {
               await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: c.id });
             }
 
@@ -82,42 +84,40 @@ jobs:
             let allSuggestions = [];
 
             for (const file of reportFiles) {
-              console.log(`📦 Обробка файлу звіту: ${file}`);
+              console.log(`📦 Читання звіту: ${file}`);
               const raw = fs.readFileSync(file, 'utf8');
               
-              // Витягуємо JSON (захист від зайвого тексту від LLM)
               const match = raw.match(/\{[\s\S]*\}/);
-              if (!match) {
-                console.log(`⚠️ Не знайдено валідного JSON у ${file}`);
-                continue;
-              }
+              if (!match) continue;
               
               let report;
               try {
                 report = JSON.parse(match[0]);
               } catch (e) {
-                console.error(`❌ Помилка JSON.parse у ${file}: ${e.message}`);
+                console.error(`❌ Помилка JSON у ${file}: ${e.message}`);
                 continue;
               }
 
-              // 1. Спочатку видаляємо префікс report_ та розширення .json
-              // 2. Тільки потім міняємо підкреслення на слеші
-              const cleanFileName = file
-                .replace(/^report_/, '')
-                .replace(/\.json$/, '')
-                .replace(/_/g, '/');
+              // Визначаємо структуру (підтримка обох форматів)
+              const suggestions = report.suggestions || (report.aiReview && report.aiReview.suggestions) || [];
+              const summary = report.summary || (report.aiReview && report.aiReview.summary) || 'Аналіз завершено';
 
-              // Шукаємо точний збіг у списку змінених файлів PR
-              const realPath = prPaths.find(p => p.includes(cleanFileName)) || cleanFileName;
-              console.log(`📍 Мапінг завершено: ${file} -> ${realPath}`);
+              // 📍 ТОЧНИЙ МАПІНГ ШЛЯХУ
+              // Шукаємо файл у PR, назва якого при перетворенні / в _ дасть ім'я звіту
+              const realPath = prPaths.find(p => {
+                const expectedName = `report_${p.replace(/\//g, '_')}.json`;
+                return expectedName === file;
+              }) || file.replace(/^report_/, '').replace(/\.json$/, '').replace(/_/g, '/');
 
-              summaryText += `### 📄 \`${realPath}\`\n${report.summary || 'Аналіз завершено'}\n\n`;
+              console.log(`📍 Знайдено шлях: ${realPath} (${suggestions.length} зауважень)`);
 
-              if (report.suggestions && Array.isArray(report.suggestions)) {
-                report.suggestions.forEach(s => {
+              summaryText += `### 📄 \`${realPath}\`\n${summary}\n\n`;
+
+              if (Array.isArray(suggestions)) {
+                suggestions.forEach(s => {
                   allSuggestions.push({
                     path: realPath,
-                    line: s.line,
+                    line: parseInt(s.line),
                     side: 'RIGHT',
                     body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
                   });
@@ -125,7 +125,7 @@ jobs:
               }
             }
 
-            // 3. Публікація результатів
+            // 3. Публікація Review
             if (allSuggestions.length > 0) {
               console.log(`🚀 Надсилаємо рев'ю з ${allSuggestions.length} зауваженнями...`);
               try {
@@ -137,14 +137,13 @@ jobs:
                   event: 'COMMENT',
                   comments: allSuggestions
                 });
-                summaryText += `\n**Знайдено зауважень: ${allSuggestions.length}**`;
+                summaryText += `\n**Всього знайдено зауважень: ${allSuggestions.length}**`;
               } catch (e) {
-                console.error(`❌ Помилка при створенні Review: ${e.message}`);
-                summaryText += `\n⚠️ Не вдалося створити inline-коментарі. Перевірте логі консолі.`;
+                console.error(`❌ Помилка GitHub API: ${e.message}`);
+                summaryText += `\n⚠️ Не вдалося додати зауваження в код (можливо, невірні номери рядків у відповіді ШІ).`;
               }
             } else {
               summaryText += "✅ Критичних зауважень не виявлено.";
-              console.log("✅ Жодних зауважень для публікації не знайдено.");
             }
 
             await github.rest.issues.createComment({
