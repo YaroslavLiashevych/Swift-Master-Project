@@ -16,11 +16,12 @@ jobs:
       - name: Checkout Target Project (This App)
         uses: actions/checkout@v4
 
-      - name: Checkout Analyzer Tool (MasterProject)
+      - name: Checkout Analyzer Tool (SwiftHybridAnalyzer)
         uses: actions/checkout@v4
         with:
-          repository: YaroslavLiashevych/MasterProject
-          path: tool-repo # Завантажуємо інструмент у окрему папку
+            # Вказуємо ПРАВИЛЬНУ назву твого репозиторію
+            repository: YaroslavLiashevych/SwiftHybridAnalyzer
+            path: tool-repo
 
       - name: Install Conductor CLI
         run: curl -fsSL https://get.conductor.build/install.sh | sh
