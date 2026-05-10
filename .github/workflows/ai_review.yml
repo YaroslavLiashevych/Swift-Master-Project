@@ -8,7 +8,7 @@ on:
 
 jobs:
   agent-review:
-    # Використовуємо macOS, оскільки нам потрібен Swift для компіляції Analyzer
+    # Використовуємо macOS, оскільки нам потрібен Swift для компіляції твого Analyzer
     runs-on: macos-15
 
     permissions:
@@ -24,19 +24,24 @@ jobs:
         with:
           repository: YaroslavLiashevych/SwiftHybridAnalyzer
           path: tool-repo
-          # Якщо репозиторій приватний, розкоментуй рядок нижче та додай секрет PAT
+          # Якщо репозиторій приватний, розкоментуй рядок нижче
           # token: ${{ secrets.MY_PAT_TOKEN }}
 
-      - name: 3. Install Conductor CLI
+      - name: 3. Install Conductor CLI (Stable via NPM)
         run: |
-          echo "📥 Installing Conductor..."
-          curl -fsSL https://get.conductor.build/install.sh | sh
+          echo "📥 Installing Conductor via npm..."
+          # Встановлюємо через npm, це надійніше за curl при проблемах з DNS
+          npm install -g @conductor-build/cli
           
-          # Перевіряємо, чи з'явився файл, щоб уникнути помилок
-          if [ -f "$HOME/.conductor/bin/conductor" ]; then
-            echo "✅ Conductor installed at $HOME/.conductor/bin/conductor"
+          # Отримуємо шлях до встановленого бінарника
+          CONDUCTOR_PATH=$(which conductor)
+          
+          if [ -n "$CONDUCTOR_PATH" ]; then
+            echo "✅ Conductor installed at $CONDUCTOR_PATH"
+            # Зберігаємо шлях у середовище GitHub Actions для наступного кроку
+            echo "CONDUCTOR_BIN=$CONDUCTOR_PATH" >> $GITHUB_ENV
           else
-            echo "❌ Installation failed"
+            echo "❌ npm installation failed"
             exit 1
           fi
 
@@ -47,8 +52,8 @@ jobs:
         run: |
           echo "🚀 Starting AI Agent..."
           
-          # Використовуємо повний шлях до conductor, щоб уникнути помилки 'command not found'
-          $HOME/.conductor/bin/conductor run "Проаналізуй файл TestFile.swift, використовуючи інструмент analyze_code з конфігурації ./tool-repo/conductor.yaml. 
+          # Використовуємо збережений шлях $CONDUCTOR_BIN
+          $CONDUCTOR_BIN run "Проаналізуй файл TestFile.swift, використовуючи інструмент analyze_code з конфігурації ./tool-repo/conductor.yaml. 
           На основі згенерованого JSON-звіту (report.json), напиши коментар у цей Pull Request. 
           Чітко вкажи рядки коду, опис помилки та запропонуй виправлення у форматі Markdown." \
           --tool ./tool-repo/conductor.yaml \
