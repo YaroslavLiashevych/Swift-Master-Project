@@ -1,49 +1,78 @@
-name: Conductor AI Agent Review
+name: Native Swift AI Review
+
 on:
   pull_request:
     paths:
       - '**.swift'
   workflow_dispatch:
+
 jobs:
   agent-review:
-    # ПОВЕРТАЄМОСЯ на macos-latest (саме тут у тебе був успішний запуск!)
     runs-on: macos-latest
+
     permissions:
       contents: read
       pull-requests: write
+
     steps:
-      - name: 1. Checkout Project
+      - name: 1. Checkout Target Project
         uses: actions/checkout@v4
 
-      - name: 2. Checkout Tool
+      - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
         with:
           repository: YaroslavLiashevych/SwiftHybridAnalyzer
           path: tool-repo
 
-      - name: 3. Install and Run AI Agent
+      - name: 3. Run Native Swift Analyzer
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🌐 Завантажуємо Conductor (з примусовим IPv4)..."
-          
-          # Цикл на 10 спроб. Прапорець -4 змушує curl обійти глюки IPv6 DNS
-          for i in {1..10}; do
-            curl -4 -fsSL https://get.conductor.build/install.sh | sh && break || sleep 10
-          done
-          
-          # Додаємо шлях
-          export PATH="$HOME/.conductor/bin:$PATH"
-          
-          # Перевіряємо, чи файл існує (розмір має бути більше ніж 9 байтів!)
-          if [ ! -f "$HOME/.conductor/bin/conductor" ]; then
-            echo "❌ Conductor не завантажився через глобальний збій мережі GitHub."
-            exit 1
-          fi
-          
-          echo "🚀 Запуск AI Агента..."
-          conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі результатів у report.json напиши детальний коментар у PR. Обов'язково вкажи блоки коду з fixed_code для виправлення помилок." \
-          --tool ./tool-repo/conductor.yaml \
-          --env file_path=TestFile.swift \
-          --env api_key=$GROQ_API_KEY
+          echo "🚀 Запускаємо твій власний Swift-інструмент..."
+          # Запускаємо твій код, який сам звернеться до Groq
+          swift run --package-path ./tool-repo/Analyzer Analyzer ${{ github.workspace }}/TestFile.swift --api-key $GROQ_API_KEY --output ${{ github.workspace }}/report.json
+
+      - name: 4. Post AI Comment to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            // Читаємо згенерований твоїм Swift-кодом звіт
+            if (!fs.existsSync('report.json')) {
+              console.log('❌ report.json не знайдено!');
+              return;
+            }
+            
+            const report = JSON.parse(fs.readFileSync('report.json', 'utf8'));
+            if (!report.aiReview) {
+              console.log('⚠️ ШІ не повернув поле aiReview');
+              return;
+            }
+            
+            // Формуємо красивий Markdown коментар на основі твоєї моделі AIReviewResponse
+            let body = `## 🤖 Swift Hybrid AI Review\n\n**Висновок:** ${report.aiReview.summary}\n\n`;
+            
+            if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
+              body += `### 🛠 Запропоновані виправлення:\n`;
+              report.aiReview.suggestions.forEach(s => {
+                body += `- **Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
+                body += `\n\`\`\`swift\n// До:\n${s.original_code}\n\n// Після:\n${s.fixed_code}\n\`\`\`\n\n`;
+              });
+            } else {
+              body += `✅ Код виглядає чудово, критичних зауважень немає!\n`;
+            }
+            
+            // Публікуємо коментар, якщо це Pull Request
+            if (context.eventName === 'pull_request') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+              console.log('✅ Коментар успішно додано до PR!');
+            } else {
+              console.log('ℹ️ Це ручний запуск (не PR). Ось що написав би бот:\n\n' + body);
+            }
