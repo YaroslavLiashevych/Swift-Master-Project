@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: 1. Checkout Target Project
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Важливо для пошуку змінених файлів
 
       - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
@@ -24,88 +26,131 @@ jobs:
           repository: YaroslavLiashevych/SwiftHybridAnalyzer
           path: tool-repo
 
-      - name: 3. Run Native Swift Analyzer
+      - name: 3. Get Changed Swift Files
+        id: changed-files
+        # Використовуємо стандартний інструмент для пошуку файлів у PR
+        uses: tj-actions/changed-files@v44
+        with:
+          files: '**/*.swift'
+
+      - name: 4. Run Analyzer for each file
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          echo "🚀 Запускаємо твій власний Swift-інструмент..."
-          swift run --package-path ./tool-repo/Analyzer Analyzer ${{ github.workspace }}/TestFile.swift --api-key $GROQ_API_KEY --output ${{ github.workspace }}/report.json
+          echo "🚀 Запускаємо аналіз змінених файлів..."
+          
+          # Отримуємо список файлів. Якщо порожньо - виходимо
+          FILES="${{ steps.changed-files.outputs.all_changed_files }}"
+          if [ -z "$FILES" ]; then
+            echo "Немає змінених .swift файлів для аналізу."
+            exit 0
+          fi
+          
+          # Запускаємо аналізатор для КОЖНОГО файлу окремо
+          for file in $FILES; do
+            echo "🔍 Аналіз файлу: $file"
+            
+            # Створюємо унікальне ім'я для звіту, замінюючи слеші на підкреслення
+            report_name="report_$(echo "$file" | sed 's/\//_/g').json"
+            
+            # Запускаємо твій інструмент
+            swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
+            
+            # Пауза 2 секунди, щоб Groq API не заблокував нас за спам (Rate Limit)
+            sleep 2
+          done
 
-      - name: 4. Post AI Comment with Auto-Fix
+      - name: 5. Post AI Comments with Auto-Fix
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             
-            // Перевіряємо, чи існує звіт
-            if (!fs.existsSync('report.json')) {
-              console.log('❌ report.json не знайдено!');
+            // Шукаємо всі згенеровані файли звітів
+            const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
+            
+            if (reportFiles.length === 0) {
+              console.log('ℹ️ Звітів не знайдено.');
               return;
             }
             
-            const report = JSON.parse(fs.readFileSync('report.json', 'utf8'));
-            if (!report.aiReview) {
-              console.log('⚠️ ШІ не повернув поле aiReview');
-              return;
+            // Видаляємо попередні загальні коментарі від бота, щоб не засмічувати PR
+            if (context.eventName === 'pull_request') {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              
+              const botComments = comments.filter(c => 
+                c.user.login === 'github-actions[bot]' && 
+                c.body.includes('## 🤖 Swift Hybrid AI Review')
+              );
+              
+              for (const comment of botComments) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+                console.log(`🗑️ Видалено старий коментар: ${comment.id}`);
+              }
             }
             
-            // Витягуємо назву файлу (якщо шлях абсолютний, беремо тільки назву)
-            let filePath = report.analyzedFile || 'TestFile.swift';
-            if (filePath.includes('/')) filePath = filePath.split('/').pop();
-            
-            const summaryBody = `## 🤖 Swift Hybrid AI Review\n\n**Висновок:** ${report.aiReview.summary}`;
-            
-            if (context.eventName !== 'pull_request') {
-              console.log('ℹ️ Ручний запуск. Звіт:\n', summaryBody);
-              return;
-            }
-            
+            let summaryText = '## 🤖 Swift Hybrid AI Review\n\n';
             let fallbackSuggestions = [];
+            let totalIssues = 0;
             
-            // 1. Проходимося по кожній помилці ОКРЕМО
-            if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
-              for (const s of report.aiReview.suggestions) {
-                try {
-                  // Намагаємось створити Inline Suggestion (кнопку авто-фіксу)
-                  await github.rest.pulls.createReview({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    pull_number: context.issue.number,
-                    event: 'COMMENT',
-                    comments: [{
-                      path: filePath,
-                      line: s.line,
-                      body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
-                    }]
-                  });
-                  console.log(`✅ Створено inline-коментар для рядка ${s.line}`);
-                } catch (error) {
-                  // Якщо GitHub блокує кнопку (бо рядок старий і не входить в Diff PR), 
-                  // зберігаємо цю помилку для загального текстового звіту
-                  console.log(`⚠️ Рядок ${s.line} не в Diff. Зберігаємо як fallback.`);
-                  fallbackSuggestions.push(s);
+            // Проходимося по звіту кожного файлу
+            for (const file of reportFiles) {
+              const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+              if (!report.aiReview) continue;
+              
+              // Зберігаємо відносний шлях для GitHub API
+              const filePath = report.analyzedFile || 'Unknown.swift';
+              summaryText += `### 📄 \`${filePath}\`\n**Висновок:** ${report.aiReview.summary}\n\n`;
+              
+              if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
+                totalIssues += report.aiReview.suggestions.length;
+                
+                for (const s of report.aiReview.suggestions) {
+                  try {
+                    // Створюємо Inline-кнопку
+                    await github.rest.pulls.createReview({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: context.issue.number,
+                      event: 'COMMENT',
+                      comments: [{
+                        path: filePath,
+                        line: s.line,
+                        body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
+                      }]
+                    });
+                  } catch (error) {
+                    // Якщо рядок старий і GitHub блокує кнопку, зберігаємо у fallback
+                    fallbackSuggestions.push({ filePath, ...s });
+                  }
                 }
               }
             }
             
-            // 2. Формуємо загальний текстовий коментар
-            let finalBody = summaryBody + '\n\n';
-            
+            // Формуємо фінальний текстовий коментар для старих рядків
             if (fallbackSuggestions.length > 0) {
-               finalBody += `### 📌 Зауваження до коду (поза зоною поточних змін PR):\n`;
+               summaryText += `\n---\n### 📌 Зауваження до коду (поза зоною поточних змін PR):\n`;
                fallbackSuggestions.forEach(s => {
-                  finalBody += `- **Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
-                  finalBody += `\n\`\`\`swift\n// Виправлений код:\n${s.fixed_code}\n\`\`\`\n\n`;
+                  summaryText += `- **Файл \`${s.filePath}\`, Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
+                  summaryText += `\n\`\`\`swift\n// Виправлений код:\n${s.fixed_code}\n\`\`\`\n\n`;
                });
-            } else if (report.aiReview.suggestions.length === 0) {
-               finalBody += `✅ Код виглядає чудово, критичних зауважень немає!`;
+            } else if (totalIssues === 0) {
+               summaryText += `✅ **Усі перевірені файли виглядають чудово, критичних зауважень немає!**`;
             }
             
-            // 3. Публікуємо Summary і всі зауваження, які не отримали кнопок
+            // Публікуємо фінальний загальний коментар
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: finalBody
+              body: summaryText
             });
