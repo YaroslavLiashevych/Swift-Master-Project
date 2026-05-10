@@ -1,26 +1,39 @@
-name: AI Code Review Conductor
+name: Conductor AI Agent Review
 on:
   pull_request:
     paths:
       - '**.swift'
   workflow_dispatch:
+
 jobs:
-  analyze:
-    runs-on: macos-latest
+  agent-review:
+    runs-on: macos-15
     permissions:
       contents: read
       pull-requests: write
+
     steps:
-      - name: Checkout Target Project
+      - name: Checkout Target Project (This App)
         uses: actions/checkout@v4
-      - name: Run Hybrid Analyzer
-        uses: YaroslavLiashevych/SwiftHybridAnalyzer@main
+
+      - name: Checkout Analyzer Tool (MasterProject)
+        uses: actions/checkout@v4
         with:
-          file-path: 'TestFile.swift'
-          api-key: \${{ secrets.GROQ_API_KEY }}
-          output-path: 'report.json'
-      - name: Upload Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-report
-          path: report.json
+          repository: YaroslavLiashevych/MasterProject
+          path: tool-repo # Завантажуємо інструмент у окрему папку
+
+      - name: Install Conductor CLI
+        run: curl -fsSL https://get.conductor.build/install.sh | sh
+
+      - name: Run AI Agent
+        env:
+          GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Запускаємо агента, який використовує твій інструмент
+          conductor run "Проаналізуй файл TestFile.swift за допомогою інструмента зі шляху ./tool-repo/conductor.yaml. 
+          Використовуй отриманий JSON-звіт, щоб написати детальний коментар у цей Pull Request. 
+          Якщо знайдеш критичні помилки, запропонуй конкретні виправлення коду." \\
+          --tool ./tool-repo/conductor.yaml \\
+          --env file_path=TestFile.swift \\
+          --env api_key=\$GROQ_API_KEY
