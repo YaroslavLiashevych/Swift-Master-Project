@@ -56,17 +56,20 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
+            
+            // 1. Отримуємо дані про PR та SHA коміту
             const { data: pullRequest } = await github.rest.pulls.get({
               owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
             });
             const commit_id = pullRequest.head.sha;
 
+            // Отримуємо реальні шляхи файлів у проекті
             const { data: prFiles } = await github.rest.pulls.listFiles({
               owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
             });
             const prPaths = prFiles.map(f => f.filename);
 
-            // Видалення старих коментарів
+            // 2. Видалення старих коментарів бота
             const { data: comments_list } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
@@ -79,19 +82,38 @@ jobs:
             let allSuggestions = [];
 
             for (const file of reportFiles) {
+              console.log(`📦 Обробка файлу звіту: ${file}`);
               const raw = fs.readFileSync(file, 'utf8');
-              const match = raw.match(/\{[\s\S]*\}/);
-              if (!match) continue;
               
-              const report = JSON.parse(match[0]);
-              if (!report.suggestions && !report.summary) continue;
+              // Витягуємо JSON (захист від зайвого тексту від LLM)
+              const match = raw.match(/\{[\s\S]*\}/);
+              if (!match) {
+                console.log(`⚠️ Не знайдено валідного JSON у ${file}`);
+                continue;
+              }
+              
+              let report;
+              try {
+                report = JSON.parse(match[0]);
+              } catch (e) {
+                console.error(`❌ Помилка JSON.parse у ${file}: ${e.message}`);
+                continue;
+              }
 
-              const fileName = file.replace('report_', '').replace(/_/g, '/').replace('.json', '');
-              const realPath = prPaths.find(p => p.includes(fileName)) || fileName;
+              // 1. Спочатку видаляємо префікс report_ та розширення .json
+              // 2. Тільки потім міняємо підкреслення на слеші
+              const cleanFileName = file
+                .replace(/^report_/, '')
+                .replace(/\.json$/, '')
+                .replace(/_/g, '/');
+
+              // Шукаємо точний збіг у списку змінених файлів PR
+              const realPath = prPaths.find(p => p.includes(cleanFileName)) || cleanFileName;
+              console.log(`📍 Мапінг завершено: ${file} -> ${realPath}`);
 
               summaryText += `### 📄 \`${realPath}\`\n${report.summary || 'Аналіз завершено'}\n\n`;
 
-              if (report.suggestions) {
+              if (report.suggestions && Array.isArray(report.suggestions)) {
                 report.suggestions.forEach(s => {
                   allSuggestions.push({
                     path: realPath,
@@ -103,19 +125,26 @@ jobs:
               }
             }
 
-            // Публікуємо всі зауваження одним рев'ю (уникаємо спаму та помилок)
+            // 3. Публікація результатів
             if (allSuggestions.length > 0) {
-              await github.rest.pulls.createReview({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: context.issue.number,
-                commit_id: commit_id,
-                event: 'COMMENT',
-                comments: allSuggestions
-              });
-              summaryText += `\n**Знайдено зауважень: ${allSuggestions.length}**`;
+              console.log(`🚀 Надсилаємо рев'ю з ${allSuggestions.length} зауваженнями...`);
+              try {
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  commit_id: commit_id,
+                  event: 'COMMENT',
+                  comments: allSuggestions
+                });
+                summaryText += `\n**Знайдено зауважень: ${allSuggestions.length}**`;
+              } catch (e) {
+                console.error(`❌ Помилка при створенні Review: ${e.message}`);
+                summaryText += `\n⚠️ Не вдалося створити inline-коментарі. Перевірте логі консолі.`;
+              }
             } else {
               summaryText += "✅ Критичних зауважень не виявлено.";
+              console.log("✅ Жодних зауважень для публікації не знайдено.");
             }
 
             await github.rest.issues.createComment({
