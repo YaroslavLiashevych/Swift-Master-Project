@@ -1,43 +1,33 @@
 name: Conductor AI Agent Review
-
 on:
-    pull_request:
+  pull_request:
     paths:
-        - '**.swift'
-    workflow_dispatch:
-
+      - '**.swift'
+  workflow_dispatch:
 jobs:
-    agent-review:
+  agent-review:
     runs-on: macos-latest
-    
     permissions:
-        contents: read
-        pull-requests: write
-
+      contents: read
+      pull-requests: write
     steps:
-        - name: 1. Checkout Target Project
+      - name: 1. Checkout Target Project
         uses: actions/checkout@v4
-
-        - name: 2. Checkout Analyzer Tool
+      - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
         with:
-            repository: YaroslavLiashevych/SwiftHybridAnalyzer
-            path: tool-repo
-
-        - name: 3. Install and Run AI Agent
+          repository: YaroslavLiashevych/SwiftHybridAnalyzer
+          path: tool-repo
+      - name: 3. Install and Run AI Agent
         env:
-            GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "📥 Installing Conductor..."
-          # Спроби встановлення (цикл для обходу DNS помилок)
           for i in {1..5}; do
             curl -fsSL https://get.conductor.build/install.sh | sh && break || sleep 5
           done
-          
-          # Додаємо в PATH
           export PATH="$HOME/.conductor/bin:$PATH"
-          
           echo "🚀 Starting AI Agent..."
           $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі звіту report.json напиши коментар у PR з порадами та блоками fixed_code." \
           --tool ./tool-repo/conductor.yaml \
