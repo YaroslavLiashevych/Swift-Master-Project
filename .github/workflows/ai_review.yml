@@ -1,61 +1,45 @@
 name: Conductor AI Agent Review
 
 on:
-  pull_request:
+    pull_request:
     paths:
-      - '**.swift'
-  workflow_dispatch:
+        - '**.swift'
+    workflow_dispatch:
 
 jobs:
-  agent-review:
-    # Використовуємо macOS, оскільки нам потрібен Swift для компіляції твого Analyzer
-    runs-on: macos-15
-
+    agent-review:
+    runs-on: macos-latest
+    
     permissions:
-      contents: read
-      pull-requests: write
+        contents: read
+        pull-requests: write
 
     steps:
-      - name: 1. Checkout Target Project (SwiftUI App)
+        - name: 1. Checkout Target Project
         uses: actions/checkout@v4
 
-      - name: 2. Checkout Analyzer Tool (SwiftHybridAnalyzer)
+        - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
         with:
-          repository: YaroslavLiashevych/SwiftHybridAnalyzer
-          path: tool-repo
-          # Якщо репозиторій приватний, розкоментуй рядок нижче
-          # token: ${{ secrets.MY_PAT_TOKEN }}
+            repository: YaroslavLiashevych/SwiftHybridAnalyzer
+            path: tool-repo
 
-      - name: 3. Install Conductor CLI (Stable via NPM)
-        run: |
-          echo "📥 Installing Conductor via npm..."
-          # Встановлюємо через npm, це надійніше за curl при проблемах з DNS
-          npm install -g @conductor-build/cli
-          
-          # Отримуємо шлях до встановленого бінарника
-          CONDUCTOR_PATH=$(which conductor)
-          
-          if [ -n "$CONDUCTOR_PATH" ]; then
-            echo "✅ Conductor installed at $CONDUCTOR_PATH"
-            # Зберігаємо шлях у середовище GitHub Actions для наступного кроку
-            echo "CONDUCTOR_BIN=$CONDUCTOR_PATH" >> $GITHUB_ENV
-          else
-            echo "❌ npm installation failed"
-            exit 1
-          fi
-
-      - name: 4. Run AI Agent
+        - name: 3. Install and Run AI Agent
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🚀 Starting AI Agent..."
+          echo "📥 Installing Conductor..."
+          # Спроби встановлення (цикл для обходу DNS помилок)
+          for i in {1..5}; do
+            curl -fsSL https://get.conductor.build/install.sh | sh && break || sleep 5
+          done
           
-          # Використовуємо збережений шлях $CONDUCTOR_BIN
-          $CONDUCTOR_BIN run "Проаналізуй файл TestFile.swift, використовуючи інструмент analyze_code з конфігурації ./tool-repo/conductor.yaml. 
-          На основі згенерованого JSON-звіту (report.json), напиши коментар у цей Pull Request. 
-          Чітко вкажи рядки коду, опис помилки та запропонуй виправлення у форматі Markdown." \
+          # Додаємо в PATH
+          export PATH="$HOME/.conductor/bin:$PATH"
+          
+          echo "🚀 Starting AI Agent..."
+          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі звіту report.json напиши коментар у PR з порадами та блоками fixed_code." \
           --tool ./tool-repo/conductor.yaml \
           --env file_path=TestFile.swift \
           --env api_key=$GROQ_API_KEY
