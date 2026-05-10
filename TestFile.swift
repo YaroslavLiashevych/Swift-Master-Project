@@ -12,3 +12,4 @@ class DetailViewController: UIViewController {
         print(upperName)
     }
 }
+// triggering ai review
