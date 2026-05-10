@@ -18,7 +18,7 @@ jobs:
       - name: 1. Checkout Target Project
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Важливо для пошуку змінених файлів
+          fetch-depth: 0
 
       - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
@@ -28,33 +28,32 @@ jobs:
 
       - name: 3. Get Changed Swift Files
         id: changed-files
-        # Використовуємо стандартний інструмент для пошуку файлів у PR
         uses: tj-actions/changed-files@v44
         with:
           files: '**/*.swift'
 
-    - name: 4. Run Analyzer for each file
-            env:
-              GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-            run: |
-              echo "🚀 Запускаємо аналіз змінених файлів..."
-              
-              FILES="${{ steps.changed-files.outputs.all_changed_files }}"
-              if [ -z "$FILES" ]; then
-                echo "Немає змінених .swift файлів для аналізу."
-                exit 0
-              fi
-              
-              for file in $FILES; do
-                echo "🔍 Аналіз файлу: $file"
-                report_name="report_$(echo "$file" | sed 's/\//_/g').json"
-                
-                swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
-                
-                # 💡 РЯТІВНИЙ КРОК: Чекаємо 40 секунд, щоб обнулити ліміт токенів Groq (6000 TPM)
-                echo "⏳ Очікування 40 секунд перед наступним файлом..."
-                sleep 40
-              done
+      - name: 4. Run Analyzer for each file
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          echo "🚀 Запускаємо аналіз змінених файлів..."
+          
+          FILES="${{ steps.changed-files.outputs.all_changed_files }}"
+          if [ -z "$FILES" ]; then
+            echo "Немає змінених .swift файлів для аналізу."
+            exit 0
+          fi
+          
+          for file in $FILES; do
+            echo "🔍 Аналіз файлу: $file"
+            
+            report_name="report_$(echo "$file" | sed 's/\//_/g').json"
+            
+            swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
+            
+            echo "⏳ Очікування 40 секунд перед наступним файлом (обхід Rate Limit Groq)..."
+            sleep 40
+          done
 
       - name: 5. Post AI Comments with Auto-Fix
         uses: actions/github-script@v7
@@ -63,7 +62,6 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // Шукаємо всі згенеровані файли звітів
             const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
             
             if (reportFiles.length === 0) {
@@ -71,7 +69,6 @@ jobs:
               return;
             }
             
-            // Видаляємо попередні загальні коментарі від бота, щоб не засмічувати PR
             if (context.eventName === 'pull_request') {
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
@@ -98,12 +95,17 @@ jobs:
             let fallbackSuggestions = [];
             let totalIssues = 0;
             
-            // Проходимося по звіту кожного файлу
             for (const file of reportFiles) {
-              const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+              let report;
+              try {
+                report = JSON.parse(fs.readFileSync(file, 'utf8'));
+              } catch (e) {
+                console.error(`❌ Помилка читання JSON з файлу ${file}:`, e);
+                continue; // Якщо JSON зламався, пропускаємо файл і йдемо далі
+              }
+              
               if (!report.aiReview) continue;
               
-              // Зберігаємо відносний шлях для GitHub API
               const filePath = report.analyzedFile || 'Unknown.swift';
               summaryText += `### 📄 \`${filePath}\`\n**Висновок:** ${report.aiReview.summary}\n\n`;
               
@@ -112,7 +114,6 @@ jobs:
                 
                 for (const s of report.aiReview.suggestions) {
                   try {
-                    // Створюємо Inline-кнопку
                     await github.rest.pulls.createReview({
                       owner: context.repo.owner,
                       repo: context.repo.repo,
@@ -125,14 +126,12 @@ jobs:
                       }]
                     });
                   } catch (error) {
-                    // Якщо рядок старий і GitHub блокує кнопку, зберігаємо у fallback
                     fallbackSuggestions.push({ filePath, ...s });
                   }
                 }
               }
             }
             
-            // Формуємо фінальний текстовий коментар для старих рядків
             if (fallbackSuggestions.length > 0) {
                summaryText += `\n---\n### 📌 Зауваження до коду (поза зоною поточних змін PR):\n`;
                fallbackSuggestions.forEach(s => {
@@ -143,7 +142,6 @@ jobs:
                summaryText += `✅ **Усі перевірені файли виглядають чудово, критичних зауважень немає!**`;
             }
             
-            // Публікуємо фінальний загальний коментар
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
