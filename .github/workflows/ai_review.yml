@@ -6,31 +6,44 @@ on:
   workflow_dispatch:
 jobs:
   agent-review:
-    runs-on: macos-14 # M1 ранери найстабільніші
+    # ПОВЕРТАЄМОСЯ на macos-latest (саме тут у тебе був успішний запуск!)
+    runs-on: macos-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
       - name: 1. Checkout Project
         uses: actions/checkout@v4
+
       - name: 2. Checkout Tool
         uses: actions/checkout@v4
         with:
           repository: YaroslavLiashevych/SwiftHybridAnalyzer
           path: tool-repo
+
       - name: 3. Install and Run AI Agent
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p $HOME/.conductor/bin
-          echo "📥 Завантаження Conductor напряму з GitHub..."
-          # Завантажуємо бінарник для Apple Silicon (arm64)
-          curl -L https://github.com/conductor-build/cli/releases/latest/download/conductor-macos-arm64 -o $HOME/.conductor/bin/conductor
-          chmod +x $HOME/.conductor/bin/conductor
+          echo "🌐 Завантажуємо Conductor (з примусовим IPv4)..."
+          
+          # Цикл на 10 спроб. Прапорець -4 змушує curl обійти глюки IPv6 DNS
+          for i in {1..10}; do
+            curl -4 -fsSL https://get.conductor.build/install.sh | sh && break || sleep 10
+          done
+          
+          # Додаємо шлях
+          export PATH="$HOME/.conductor/bin:$PATH"
+          
+          # Перевіряємо, чи файл існує (розмір має бути більше ніж 9 байтів!)
+          if [ ! -f "$HOME/.conductor/bin/conductor" ]; then
+            echo "❌ Conductor не завантажився через глобальний збій мережі GitHub."
+            exit 1
+          fi
           
           echo "🚀 Запуск AI Агента..."
-          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі результатів у report.json напиши детальний коментар у PR. Обов'язково вкажи блоки коду з fixed_code для виправлення помилок." \
+          conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі результатів у report.json напиши детальний коментар у PR. Обов'язково вкажи блоки коду з fixed_code для виправлення помилок." \
           --tool ./tool-repo/conductor.yaml \
           --env file_path=TestFile.swift \
           --env api_key=$GROQ_API_KEY
