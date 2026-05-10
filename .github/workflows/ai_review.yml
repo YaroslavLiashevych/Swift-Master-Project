@@ -38,6 +38,7 @@ jobs:
           script: |
             const fs = require('fs');
             
+            // Перевіряємо, чи існує звіт
             if (!fs.existsSync('report.json')) {
               console.log('❌ report.json не знайдено!');
               return;
@@ -49,8 +50,10 @@ jobs:
               return;
             }
             
-            // Назва файлу береться з твого JSON
-            const filePath = report.analyzedFile || 'TestFile.swift';
+            // Витягуємо назву файлу (якщо шлях абсолютний, беремо тільки назву)
+            let filePath = report.analyzedFile || 'TestFile.swift';
+            if (filePath.includes('/')) filePath = filePath.split('/').pop();
+            
             const summaryBody = `## 🤖 Swift Hybrid AI Review\n\n**Висновок:** ${report.aiReview.summary}`;
             
             if (context.eventName !== 'pull_request') {
@@ -58,53 +61,51 @@ jobs:
               return;
             }
             
-            // Формуємо масив коментарів з прив'язкою до рядків коду
-            let reviewComments = [];
+            let fallbackSuggestions = [];
+            
+            // 1. Проходимося по кожній помилці ОКРЕМО
             if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
-              report.aiReview.suggestions.forEach(s => {
-                // Використовуємо синтаксис ```suggestion для створення кнопки авто-фіксу
-                reviewComments.push({
-                  path: filePath,
-                  line: s.line,
-                  body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
-                });
-              });
+              for (const s of report.aiReview.suggestions) {
+                try {
+                  // Намагаємось створити Inline Suggestion (кнопку авто-фіксу)
+                  await github.rest.pulls.createReview({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: context.issue.number,
+                    event: 'COMMENT',
+                    comments: [{
+                      path: filePath,
+                      line: s.line,
+                      body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
+                    }]
+                  });
+                  console.log(`✅ Створено inline-коментар для рядка ${s.line}`);
+                } catch (error) {
+                  // Якщо GitHub блокує кнопку (бо рядок старий і не входить в Diff PR), 
+                  // зберігаємо цю помилку для загального текстового звіту
+                  console.log(`⚠️ Рядок ${s.line} не в Diff. Зберігаємо як fallback.`);
+                  fallbackSuggestions.push(s);
+                }
+              }
             }
             
-            try {
-              if (reviewComments.length > 0) {
-                // Створюємо справжнє Pull Request Review
-                await github.rest.pulls.createReview({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.issue.number,
-                  body: summaryBody,
-                  event: 'COMMENT',
-                  comments: reviewComments
-                });
-                console.log('✅ Inline-коментарі з кнопками успішно додано!');
-              } else {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.issue.number,
-                  body: summaryBody + '\n\n✅ Код виглядає чудово, критичних зауважень немає!'
-                });
-              }
-            } catch (error) {
-              console.error('⚠️ Рядки не відповідають diff у цьому PR. Переходимо на стандартний коментар...', error);
-              
-              // Fallback: виводимо текстом, якщо GitHub не дав створити inline-коментар
-              let fallbackBody = summaryBody + '\n\n### 🛠 Запропоновані виправлення:\n';
-              report.aiReview.suggestions.forEach(s => {
-                fallbackBody += `- **Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
-                fallbackBody += `\n\`\`\`swift\n// Виправлений код:\n${s.fixed_code}\n\`\`\`\n\n`;
-              });
-              
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: fallbackBody
-              });
+            // 2. Формуємо загальний текстовий коментар
+            let finalBody = summaryBody + '\n\n';
+            
+            if (fallbackSuggestions.length > 0) {
+               finalBody += `### 📌 Зауваження до коду (поза зоною поточних змін PR):\n`;
+               fallbackSuggestions.forEach(s => {
+                  finalBody += `- **Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
+                  finalBody += `\n\`\`\`swift\n// Виправлений код:\n${s.fixed_code}\n\`\`\`\n\n`;
+               });
+            } else if (report.aiReview.suggestions.length === 0) {
+               finalBody += `✅ Код виглядає чудово, критичних зауважень немає!`;
             }
+            
+            // 3. Публікуємо Summary і всі зауваження, які не отримали кнопок
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: finalBody
+            });
