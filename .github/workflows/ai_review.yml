@@ -36,16 +36,17 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
+          echo "🚀 Починаємо аналіз..."
           FILES="${{ steps.changed-files.outputs.all_changed_files }}"
           if [ -z "$FILES" ]; then exit 0; fi
           
           for file in $FILES; do
-            echo "🔍 Аналіз файлу: $file"
+            echo "🔍 Файл: $file"
             report_name="report_$(echo "$file" | sed 's/\//_/g').json"
             
             swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
             
-            echo "⏳ Очікування 45 секунд (Rate Limit Groq)..."
+            echo "⏳ Пауза 45с (Rate Limit)..."
             sleep 45
           done
 
@@ -55,82 +56,65 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            
-            // 1. Отримуємо дані про PR та список змінених файлів
             const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
             });
             const commit_id = pullRequest.head.sha;
 
             const { data: prFiles } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
             });
             const prPaths = prFiles.map(f => f.filename);
 
-            const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
-            if (reportFiles.length === 0) return;
-
-            // 2. Видалення старих коментарів бота
-            const { data: comments } = await github.rest.issues.listComments({
+            // Видалення старих коментарів
+            const { data: comments_list } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
-            const botComments = comments.filter(c => c.user.login === 'github-actions[bot]' && c.body.includes('## 🤖 Swift Hybrid AI Review'));
-            for (const comment of botComments) {
-              await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: comment.id });
+            for (const c of comments_list.filter(c => c.user.login === 'github-actions[bot]' && c.body.includes('## 🤖 Swift Hybrid AI Review'))) {
+              await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: c.id });
             }
 
+            const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
             let summaryText = '## 🤖 Swift Hybrid AI Review\n\n';
-            let totalIssues = 0;
+            let allSuggestions = [];
 
             for (const file of reportFiles) {
-              let rawContent = fs.readFileSync(file, 'utf8');
-              let report;
+              const raw = fs.readFileSync(file, 'utf8');
+              const match = raw.match(/\{[\s\S]*\}/);
+              if (!match) continue;
               
-              try {
-                // Використовуємо Regex для надійного витягування JSON
-                const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) throw new Error("JSON об'єкт не знайдено у відповіді");
-                report = JSON.parse(jsonMatch[0]);
-              } catch (e) {
-                console.error(`❌ Помилка парсингу ${file}:`, e.message);
-                summaryText += `⚠️ **Файл \`${file}\`**: Не вдалося обробити звіт через помилку формату ШІ.\n\n`;
-                continue;
-              }
+              const report = JSON.parse(match[0]);
+              if (!report.suggestions && !report.summary) continue;
 
-              if (!report.summary) continue;
-              
-              // Знаходимо реальний шлях файлу в проекті
-              const fileNameInReport = file.replace('report_', '').replace(/_/g, '/').replace('.json', '');
-              const realFilePath = prPaths.find(p => p.includes(fileNameInReport)) || fileNameInReport;
+              const fileName = file.replace('report_', '').replace(/_/g, '/').replace('.json', '');
+              const realPath = prPaths.find(p => p.includes(fileName)) || fileName;
 
-              summaryText += `### 📄 \`${realFilePath}\`\n**Висновок:** ${report.summary}\n\n`;
+              summaryText += `### 📄 \`${realPath}\`\n${report.summary || 'Аналіз завершено'}\n\n`;
 
-              if (report.suggestions && report.suggestions.length > 0) {
-                for (const s of report.suggestions) {
-                  totalIssues++;
-                  try {
-                    await github.rest.pulls.createReviewComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      pull_number: context.issue.number,
-                      commit_id: commit_id,
-                      path: realFilePath,
-                      line: s.line,
-                      side: 'RIGHT',
-                      body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
-                    });
-                  } catch (error) {
-                    console.log(`⚠️ Не вдалося створити Suggestion для ${realFilePath}:${s.line} - ${error.message}`);
-                  }
-                }
+              if (report.suggestions) {
+                report.suggestions.forEach(s => {
+                  allSuggestions.push({
+                    path: realPath,
+                    line: s.line,
+                    side: 'RIGHT',
+                    body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
+                  });
+                });
               }
             }
 
-            if (totalIssues === 0) {
+            // Публікуємо всі зауваження одним рев'ю (уникаємо спаму та помилок)
+            if (allSuggestions.length > 0) {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                commit_id: commit_id,
+                event: 'COMMENT',
+                comments: allSuggestions
+              });
+              summaryText += `\n**Знайдено зауважень: ${allSuggestions.length}**`;
+            } else {
               summaryText += "✅ Критичних зауважень не виявлено.";
             }
 
