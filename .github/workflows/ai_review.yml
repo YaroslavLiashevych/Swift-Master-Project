@@ -41,13 +41,11 @@ jobs:
           
           for file in $FILES; do
             echo "🔍 Аналіз файлу: $file"
-            # Створюємо унікальне ім'я для звіту
             report_name="report_$(echo "$file" | sed 's/\//_/g').json"
             
-            # Запускаємо Swift-інструмент
             swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
             
-            echo "⏳ Очікування 45 секунд (Rate Limit)..."
+            echo "⏳ Очікування 45 секунд (Rate Limit Groq)..."
             sleep 45
           done
 
@@ -58,7 +56,7 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // 1. Отримуємо дані про PR
+            // 1. Отримуємо дані про PR та список змінених файлів
             const { data: pullRequest } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -66,10 +64,17 @@ jobs:
             });
             const commit_id = pullRequest.head.sha;
 
+            const { data: prFiles } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            const prPaths = prFiles.map(f => f.filename);
+
             const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
             if (reportFiles.length === 0) return;
 
-            // 2. Видалення старих коментарів
+            // 2. Видалення старих коментарів бота
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
@@ -79,7 +84,6 @@ jobs:
             }
 
             let summaryText = '## 🤖 Swift Hybrid AI Review\n\n';
-            let fallbackSuggestions = [];
             let totalIssues = 0;
 
             for (const file of reportFiles) {
@@ -87,26 +91,26 @@ jobs:
               let report;
               
               try {
-                // Спроба очистити JSON від можливих артефактів ШІ
-                const cleanedContent = rawContent.substring(rawContent.indexOf('{'), rawContent.lastIndexOf('}') + 1);
-                report = JSON.parse(cleanedContent);
+                // Використовуємо Regex для надійного витягування JSON
+                const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) throw new Error("JSON об'єкт не знайдено у відповіді");
+                report = JSON.parse(jsonMatch[0]);
               } catch (e) {
-                console.error(`❌ Не вдалося розпарсити ${file}. Вміст був занадто "ламаний".`);
-                summaryText += `⚠️ **Файл \`${file}\`**: ШІ згенерував занадто складний код, який не вдалося автоматично обробити.\n\n`;
+                console.error(`❌ Помилка парсингу ${file}:`, e.message);
+                summaryText += `⚠️ **Файл \`${file}\`**: Не вдалося обробити звіт через помилку формату ШІ.\n\n`;
                 continue;
               }
 
-              if (!report.aiReview) continue;
+              if (!report.summary) continue;
               
-              // Знаходимо реальний шлях файлу
-              const shortName = report.analyzedFile || '';
-              const realFilePath = pullRequest.base.repo.full_name.includes(context.repo.repo) ? 
-                                   (file.replace('report_', '').replace(/_/g, '/').replace('.json', '')) : shortName;
+              // Знаходимо реальний шлях файлу в проекті
+              const fileNameInReport = file.replace('report_', '').replace(/_/g, '/').replace('.json', '');
+              const realFilePath = prPaths.find(p => p.includes(fileNameInReport)) || fileNameInReport;
 
-              summaryText += `### 📄 \`${realFilePath}\`\n**Висновок:** ${report.aiReview.summary}\n\n`;
+              summaryText += `### 📄 \`${realFilePath}\`\n**Висновок:** ${report.summary}\n\n`;
 
-              if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
-                for (const s of report.aiReview.suggestions) {
+              if (report.suggestions && report.suggestions.length > 0) {
+                for (const s of report.suggestions) {
                   totalIssues++;
                   try {
                     await github.rest.pulls.createReviewComment({
@@ -120,19 +124,14 @@ jobs:
                       body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
                     });
                   } catch (error) {
-                    console.log(`⚠️ Кнопка не створена для рядка ${s.line}: ${error.message}`);
-                    fallbackSuggestions.push({ realFilePath, ...s });
+                    console.log(`⚠️ Не вдалося створити Suggestion для ${realFilePath}:${s.line} - ${error.message}`);
                   }
                 }
               }
             }
 
-            // Формуємо фінальний текстовий звіт
-            if (fallbackSuggestions.length > 0) {
-              summaryText += `\n---\n### 📌 Додаткові зауваження:\n`;
-              fallbackSuggestions.forEach(s => {
-                summaryText += `- **${s.realFilePath}:${s.line}** [${s.issue_type}]: ${s.explanation}\n`;
-              });
+            if (totalIssues === 0) {
+              summaryText += "✅ Критичних зауважень не виявлено.";
             }
 
             await github.rest.issues.createComment({
