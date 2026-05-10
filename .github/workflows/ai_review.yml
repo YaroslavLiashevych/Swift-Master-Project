@@ -1,0 +1,26 @@
+name: AI Code Review Conductor
+on:
+  pull_request:
+    paths:
+      - '**.swift'
+  workflow_dispatch:
+jobs:
+  analyze:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout Target Project
+        uses: actions/checkout@v4
+      - name: Run Hybrid Analyzer
+        uses: YaroslavLiashevych/SwiftHybridAnalyzer@main
+        with:
+          file-path: 'TestFile.swift'
+          api-key: \${{ secrets.GROQ_API_KEY }}
+          output-path: 'report.json'
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-report
+          path: report.json
