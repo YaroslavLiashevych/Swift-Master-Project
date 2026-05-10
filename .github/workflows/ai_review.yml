@@ -33,32 +33,28 @@ jobs:
         with:
           files: '**/*.swift'
 
-      - name: 4. Run Analyzer for each file
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: |
-          echo "🚀 Запускаємо аналіз змінених файлів..."
-          
-          # Отримуємо список файлів. Якщо порожньо - виходимо
-          FILES="${{ steps.changed-files.outputs.all_changed_files }}"
-          if [ -z "$FILES" ]; then
-            echo "Немає змінених .swift файлів для аналізу."
-            exit 0
-          fi
-          
-          # Запускаємо аналізатор для КОЖНОГО файлу окремо
-          for file in $FILES; do
-            echo "🔍 Аналіз файлу: $file"
-            
-            # Створюємо унікальне ім'я для звіту, замінюючи слеші на підкреслення
-            report_name="report_$(echo "$file" | sed 's/\//_/g').json"
-            
-            # Запускаємо твій інструмент
-            swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
-            
-            # Пауза 2 секунди, щоб Groq API не заблокував нас за спам (Rate Limit)
-            sleep 2
-          done
+    - name: 4. Run Analyzer for each file
+            env:
+              GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+            run: |
+              echo "🚀 Запускаємо аналіз змінених файлів..."
+              
+              FILES="${{ steps.changed-files.outputs.all_changed_files }}"
+              if [ -z "$FILES" ]; then
+                echo "Немає змінених .swift файлів для аналізу."
+                exit 0
+              fi
+              
+              for file in $FILES; do
+                echo "🔍 Аналіз файлу: $file"
+                report_name="report_$(echo "$file" | sed 's/\//_/g').json"
+                
+                swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
+                
+                # 💡 РЯТІВНИЙ КРОК: Чекаємо 40 секунд, щоб обнулити ліміт токенів Groq (6000 TPM)
+                echo "⏳ Очікування 40 секунд перед наступним файлом..."
+                sleep 40
+              done
 
       - name: 5. Post AI Comments with Auto-Fix
         uses: actions/github-script@v7
