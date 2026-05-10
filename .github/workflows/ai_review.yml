@@ -6,14 +6,15 @@ on:
   workflow_dispatch:
 jobs:
   agent-review:
-    runs-on: macos-latest
+    # Змінюємо на macos-14, вона зазвичай швидше підхоплює DNS
+    runs-on: macos-14
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - name: 1. Checkout Target Project
+      - name: 1. Checkout Project
         uses: actions/checkout@v4
-      - name: 2. Checkout Analyzer Tool
+      - name: 2. Checkout Tool
         uses: actions/checkout@v4
         with:
           repository: YaroslavLiashevych/SwiftHybridAnalyzer
@@ -23,13 +24,26 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "📥 Installing Conductor..."
-          for i in {1..5}; do
-            curl -fsSL https://get.conductor.build/install.sh | sh && break || sleep 5
-          done
+          echo "🌐 Чекаємо 20 секунд, щоб мережа прокинулася..."
+          sleep 20
+          
+          echo "📥 Встановлюємо Conductor..."
+          # Використовуємо більш потужний curl з повторами та ігноруванням помилок DNS на старті
+          curl --retry 5 --retry-delay 5 -fsSL https://get.conductor.build/install.sh | sh
+          
+          # Додаємо шлях
           export PATH="$HOME/.conductor/bin:$PATH"
-          echo "🚀 Starting AI Agent..."
-          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі звіту report.json напиши коментар у PR з порадами та блоками fixed_code." \
+          
+          # Перевіряємо, чи з'явився файл. Якщо ні — спробуємо альтернативний лінк
+          if ! command -v conductor &> /dev/null; then
+            echo "⚠️ Скрипт не спрацював, пробуємо пряме завантаження..."
+            mkdir -p $HOME/.conductor/bin
+            curl -L https://binaries.conductor.build/cli/latest/conductor-macos-arm64 -o $HOME/.conductor/bin/conductor
+            chmod +x $HOME/.conductor/bin/conductor
+          fi
+          
+          echo "🚀 Запускаємо AI Агента..."
+          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. Напиши коментар у PR з порадами та кодом у форматі Markdown." \
           --tool ./tool-repo/conductor.yaml \
           --env file_path=TestFile.swift \
           --env api_key=$GROQ_API_KEY
