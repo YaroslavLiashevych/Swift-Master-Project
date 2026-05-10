@@ -6,8 +6,7 @@ on:
   workflow_dispatch:
 jobs:
   agent-review:
-    # Змінюємо на macos-14, вона зазвичай швидше підхоплює DNS
-    runs-on: macos-14
+    runs-on: macos-14 # M1 ранери найстабільніші
     permissions:
       contents: read
       pull-requests: write
@@ -24,26 +23,14 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🌐 Чекаємо 20 секунд, щоб мережа прокинулася..."
-          sleep 20
+          mkdir -p $HOME/.conductor/bin
+          echo "📥 Завантаження Conductor напряму з GitHub..."
+          # Завантажуємо бінарник для Apple Silicon (arm64)
+          curl -L https://github.com/conductor-build/cli/releases/latest/download/conductor-macos-arm64 -o $HOME/.conductor/bin/conductor
+          chmod +x $HOME/.conductor/bin/conductor
           
-          echo "📥 Встановлюємо Conductor..."
-          # Використовуємо більш потужний curl з повторами та ігноруванням помилок DNS на старті
-          curl --retry 5 --retry-delay 5 -fsSL https://get.conductor.build/install.sh | sh
-          
-          # Додаємо шлях
-          export PATH="$HOME/.conductor/bin:$PATH"
-          
-          # Перевіряємо, чи з'явився файл. Якщо ні — спробуємо альтернативний лінк
-          if ! command -v conductor &> /dev/null; then
-            echo "⚠️ Скрипт не спрацював, пробуємо пряме завантаження..."
-            mkdir -p $HOME/.conductor/bin
-            curl -L https://binaries.conductor.build/cli/latest/conductor-macos-arm64 -o $HOME/.conductor/bin/conductor
-            chmod +x $HOME/.conductor/bin/conductor
-          fi
-          
-          echo "🚀 Запускаємо AI Агента..."
-          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. Напиши коментар у PR з порадами та кодом у форматі Markdown." \
+          echo "🚀 Запуск AI Агента..."
+          $HOME/.conductor/bin/conductor run "Проаналізуй TestFile.swift через ./tool-repo/conductor.yaml. На основі результатів у report.json напиши детальний коментар у PR. Обов'язково вкажи блоки коду з fixed_code для виправлення помилок." \
           --tool ./tool-repo/conductor.yaml \
           --env file_path=TestFile.swift \
           --env api_key=$GROQ_API_KEY
