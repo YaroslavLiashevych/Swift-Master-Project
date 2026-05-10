@@ -18,7 +18,7 @@ jobs:
       - name: 1. Checkout Target Project
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Важливо для пошуку змінених файлів
+          fetch-depth: 0
 
       - name: 2. Checkout Analyzer Tool
         uses: actions/checkout@v4
@@ -28,7 +28,6 @@ jobs:
 
       - name: 3. Get Changed Swift Files
         id: changed-files
-        # Використовуємо стандартний інструмент для пошуку файлів у PR
         uses: tj-actions/changed-files@v44
         with:
           files: '**/*.swift'
@@ -37,27 +36,19 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          echo "🚀 Запускаємо аналіз змінених файлів..."
-          
-          # Отримуємо список файлів. Якщо порожньо - виходимо
+          echo "🚀 Починаємо аналіз..."
           FILES="${{ steps.changed-files.outputs.all_changed_files }}"
-          if [ -z "$FILES" ]; then
-            echo "Немає змінених .swift файлів для аналізу."
-            exit 0
-          fi
+          if [ -z "$FILES" ]; then exit 0; fi
           
-          # Запускаємо аналізатор для КОЖНОГО файлу окремо
           for file in $FILES; do
-            echo "🔍 Аналіз файлу: $file"
-            
-            # Створюємо унікальне ім'я для звіту, замінюючи слеші на підкреслення
+            echo "🔍 Файл: $file"
+            # Перетворюємо шлях TestCases/File.swift -> report_TestCases_File.swift.json
             report_name="report_$(echo "$file" | sed 's/\//_/g').json"
             
-            # Запускаємо твій інструмент
             swift run --package-path ./tool-repo/Analyzer Analyzer "$file" --api-key $GROQ_API_KEY --output "$report_name"
             
-            # Пауза 2 секунди, щоб Groq API не заблокував нас за спам (Rate Limit)
-            sleep 2
+            echo "⏳ Пауза 45с (Rate Limit Groq)..."
+            sleep 45
           done
 
       - name: 5. Post AI Comments with Auto-Fix
@@ -67,90 +58,94 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // Шукаємо всі згенеровані файли звітів
-            const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
-            
-            if (reportFiles.length === 0) {
-              console.log('ℹ️ Звітів не знайдено.');
-              return;
+            // 1. Отримуємо дані про PR та SHA коміту
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
+            });
+            const commit_id = pullRequest.head.sha;
+
+            // Отримуємо список змінених файлів
+            const { data: prFiles } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
+            });
+            const prPaths = prFiles.map(f => f.filename);
+
+            // 2. Видалення старих коментарів бота
+            const { data: comments_list } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+            const oldBotComments = comments_list.filter(c => c.user.login === 'github-actions[bot]' && c.body.includes('## 🤖 Swift Hybrid AI Review'));
+            for (const c of oldBotComments) {
+              await github.rest.issues.deleteComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: c.id });
             }
-            
-            // Видаляємо попередні загальні коментарі від бота, щоб не засмічувати PR
-            if (context.eventName === 'pull_request') {
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              });
+
+            const reportFiles = fs.readdirSync('.').filter(f => f.startsWith('report_') && f.endsWith('.json'));
+            let summaryText = '## 🤖 Swift Hybrid AI Review\n\n';
+            let allSuggestions = [];
+
+            for (const file of reportFiles) {
+              console.log(`📦 Читання звіту: ${file}`);
+              const raw = fs.readFileSync(file, 'utf8');
               
-              const botComments = comments.filter(c => 
-                c.user.login === 'github-actions[bot]' && 
-                c.body.includes('## 🤖 Swift Hybrid AI Review')
-              );
+              const match = raw.match(/\{[\s\S]*\}/);
+              if (!match) continue;
               
-              for (const comment of botComments) {
-                await github.rest.issues.deleteComment({
+              let report;
+              try {
+                report = JSON.parse(match[0]);
+              } catch (e) {
+                console.error(`❌ Помилка JSON у ${file}: ${e.message}`);
+                continue;
+              }
+
+              // Визначаємо структуру (підтримка обох форматів)
+              const suggestions = report.suggestions || (report.aiReview && report.aiReview.suggestions) || [];
+              const summary = report.summary || (report.aiReview && report.aiReview.summary) || 'Аналіз завершено';
+
+              // 📍 ТОЧНИЙ МАПІНГ ШЛЯХУ
+              // Шукаємо файл у PR, назва якого при перетворенні / в _ дасть ім'я звіту
+              const realPath = prPaths.find(p => {
+                const expectedName = `report_${p.replace(/\//g, '_')}.json`;
+                return expectedName === file;
+              }) || file.replace(/^report_/, '').replace(/\.json$/, '').replace(/_/g, '/');
+
+              console.log(`📍 Знайдено шлях: ${realPath} (${suggestions.length} зауважень)`);
+
+              summaryText += `### 📄 \`${realPath}\`\n${summary}\n\n`;
+
+              if (Array.isArray(suggestions)) {
+                suggestions.forEach(s => {
+                  allSuggestions.push({
+                    path: realPath,
+                    line: parseInt(s.line),
+                    side: 'RIGHT',
+                    body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
+                  });
+                });
+              }
+            }
+
+            // 3. Публікація Review
+            if (allSuggestions.length > 0) {
+              console.log(`🚀 Надсилаємо рев'ю з ${allSuggestions.length} зауваженнями...`);
+              try {
+                await github.rest.pulls.createReview({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  comment_id: comment.id,
+                  pull_number: context.issue.number,
+                  commit_id: commit_id,
+                  event: 'COMMENT',
+                  comments: allSuggestions
                 });
-                console.log(`🗑️ Видалено старий коментар: ${comment.id}`);
+                summaryText += `\n**Всього знайдено зауважень: ${allSuggestions.length}**`;
+              } catch (e) {
+                console.error(`❌ Помилка GitHub API: ${e.message}`);
+                summaryText += `\n⚠️ Не вдалося додати зауваження в код (можливо, невірні номери рядків у відповіді ШІ).`;
               }
+            } else {
+              summaryText += "✅ Критичних зауважень не виявлено.";
             }
-            
-            let summaryText = '## 🤖 Swift Hybrid AI Review\n\n';
-            let fallbackSuggestions = [];
-            let totalIssues = 0;
-            
-            // Проходимося по звіту кожного файлу
-            for (const file of reportFiles) {
-              const report = JSON.parse(fs.readFileSync(file, 'utf8'));
-              if (!report.aiReview) continue;
-              
-              // Зберігаємо відносний шлях для GitHub API
-              const filePath = report.analyzedFile || 'Unknown.swift';
-              summaryText += `### 📄 \`${filePath}\`\n**Висновок:** ${report.aiReview.summary}\n\n`;
-              
-              if (report.aiReview.suggestions && report.aiReview.suggestions.length > 0) {
-                totalIssues += report.aiReview.suggestions.length;
-                
-                for (const s of report.aiReview.suggestions) {
-                  try {
-                    // Створюємо Inline-кнопку
-                    await github.rest.pulls.createReview({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      pull_number: context.issue.number,
-                      event: 'COMMENT',
-                      comments: [{
-                        path: filePath,
-                        line: s.line,
-                        body: `**[${s.issue_type}]**\n${s.explanation}\n\n\`\`\`suggestion\n${s.fixed_code}\n\`\`\``
-                      }]
-                    });
-                  } catch (error) {
-                    // Якщо рядок старий і GitHub блокує кнопку, зберігаємо у fallback
-                    fallbackSuggestions.push({ filePath, ...s });
-                  }
-                }
-              }
-            }
-            
-            // Формуємо фінальний текстовий коментар для старих рядків
-            if (fallbackSuggestions.length > 0) {
-               summaryText += `\n---\n### 📌 Зауваження до коду (поза зоною поточних змін PR):\n`;
-               fallbackSuggestions.forEach(s => {
-                  summaryText += `- **Файл \`${s.filePath}\`, Рядок ${s.line}** (${s.issue_type}): ${s.explanation}\n`;
-                  summaryText += `\n\`\`\`swift\n// Виправлений код:\n${s.fixed_code}\n\`\`\`\n\n`;
-               });
-            } else if (totalIssues === 0) {
-               summaryText += `✅ **Усі перевірені файли виглядають чудово, критичних зауважень немає!**`;
-            }
-            
-            // Публікуємо фінальний загальний коментар
+
             await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: summaryText
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: summaryText
             });
