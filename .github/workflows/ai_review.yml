@@ -24,17 +24,19 @@ jobs:
             path: tool-repo
 
       - name: Install Conductor CLI
-        run: curl -fsSL https://get.conductor.build/install.sh | sh
+        run: |
+          curl -fsSL https://get.conductor.build/install.sh | sh
+          # Додаємо шлях до бінарника в системний PATH GitHub Actions
+          echo "$HOME/.conductor/bin" >> $GITHUB_PATH
 
       - name: Run AI Agent
         env:
-          GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Запускаємо агента, який використовує твій інструмент
-          conductor run "Проаналізуй файл TestFile.swift за допомогою інструмента зі шляху ./tool-repo/conductor.yaml. 
-          Використовуй отриманий JSON-звіт, щоб написати детальний коментар у цей Pull Request. 
-          Якщо знайдеш критичні помилки, запропонуй конкретні виправлення коду." \\
-          --tool ./tool-repo/conductor.yaml \\
-          --env file_path=TestFile.swift \\
-          --env api_key=\$GROQ_API_KEY
+          # Тепер команда 'conductor' буде доступна
+          conductor run "Використовуй інструмент із ./tool-repo/conductor.yaml для аналізу TestFile.swift. 
+          На основі звіту report.json напиши коментар у цей PR з результатами та порадами." \
+          --tool ./tool-repo/conductor.yaml \
+          --env file_path=TestFile.swift \
+          --env api_key=$GROQ_API_KEY
